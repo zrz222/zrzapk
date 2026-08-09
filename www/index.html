@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0,maximum‑scale=1.0,user‑scalable=no">
+<title>zrzBR</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#1a1a1a;color:#eee;padding:12px;font-family:system‑ui;}
+#textBox{width:100%;min‑height:320px;background:#272727;padding:14px;border‑radius:10px;white‑space:pre‑wrap;line‑height:1.8;font‑size:17px;overflow‑y:auto;margin‑bottom:14px;}
+.ctrl{display:grid;grid‑template‑columns:1fr 1fr 1fr 1fr;gap:8px;margin‑bottom:12px;}
+button{padding:12px 6px;font‑size:15px;border:none;border‑radius:8px;background:#3671d9;color:#fff;}
+#speedWrap{display:flex;gap:8px;align‑items:center;margin:10px 0;}
+#speedSlider{flex‑grow:1;}
+#resetSpeedBtn{padding:8px;}
+#status{margin:8px 0;color:#aaa;font‑size:14px;}
+</style>
+</head>
+<body>
+<input type="file" id="fileInput" accept=".txt" style="margin‑bottom:12px;color:#fff;">
+<div id="status">等待加载小说</div>
+<div id="textBox"></div>
+<div class="ctrl">
+<button id="prevBtn">上一页</button>
+<button id="playBtn">播放</button>
+<button id="pauseBtn">暂停</button>
+<button id="nextBtn">下一页</button>
+</div>
+<div id="speedWrap">
+<span>语速</span>
+<input type="range" id="speedSlider" min="0.5" max="2.2" step="0.05" value="1">
+<button id="resetSpeedBtn">重置1.0x</button>
+<span id="speedVal">1.00</span>
+</div>
+
+<script src="piper‑run.js"></script>
+<script>
+const statusDom = document.getElementById("status");
+const textDom = document.getElementById("textBox");
+const fileInput = document.getElementById("fileInput");
+const playBtn = document.getElementById("playBtn");
+const pauseBtn = document.getElementById("pauseBtn");
+const prevBtn = document.getElementById("prevBtn");
+const nextBtn = document.getElementById("nextBtn");
+const speedSlider = document.getElementById("speedSlider");
+const resetSpeedBtn = document.getElementById("resetSpeedBtn");
+const speedVal = document.getElementById("speedVal");
+
+let bookText = "";
+let readPos = 0;
+const pageSize = 800;
+let isPlaying = false;
+let speechRate = 1.0;
+const defaultRate = 1.0;
+let autoNextDelay = 220;
+let edgeAbortCtrl = null;
+let piperInstance = null;
+
+window.onload = ()=>{
+  const savePos = localStorage.getItem("readPos");
+  if(savePos) readPos = Number(savePos);
+  speedSlider.value = speechRate;
+  speedVal.innerText = speechRate.toFixed(2);
+}
+
+speedSlider.oninput = ()=>{
+  speechRate = parseFloat(speedSlider.value);
+  speedVal.innerText = speechRate.toFixed(2);
+}
+resetSpeedBtn.onclick = ()=>{
+  speechRate = defaultRate;
+  speedSlider.value = speechRate;
+  speedVal.innerText = speechRate.toFixed(2);
+}
+
+fileInput.onchange = async e=>{
+  const f = e.target.files[0];
+  if(!f)return;
+  const buf = await f.arrayBuffer();
+  let txt;
+  try{
+    txt = new TextDecoder("utf‑8").decode(buf);
+  }catch{
+    txt = new TextDecoder("gbk").decode(buf);
+  }
+  bookText = txt;
+  readPos = 0;
+  localStorage.setItem("readPos",readPos);
+  renderPage();
+  statusDom.innerText="文本载入完成";
+}
+
+function renderPage(){
+  const pageTxt = bookText.slice(readPos,readPos+pageSize);
+  textDom.innerText = pageTxt||"(已读完全书)";
+}
+
+prevBtn.onclick = ()=>{
+  stopAllSpeak();
+  readPos = Math.max(0,readPos‑pageSize);
+  localStorage.setItem("readPos",readPos);
+  renderPage();
+}
+nextBtn.onclick = ()=>{
+  stopAllSpeak();
+  readPos += pageSize;
+  localStorage.setItem("readPos",readPos);
+  renderPage();
+}
+
+function stopAllSpeak(){
+  isPlaying = false;
+  if(edgeAbortCtrl) edgeAbortCtrl.abort();
+  if(piperInstance?.stop) piperInstance.stop();
+}
+
+async function readCurrentPage(){
+  if(!bookText) return;
+  const pageTxt = bookText.slice(readPos,readPos+pageSize).trim();
+  if(!pageTxt){
+    statusDom.innerText="全部朗读完毕";
+    isPlaying = false;
+    return;
+  }
+  statusDom.innerText="Edge在线朗读";
+  try{
+    edgeAbortCtrl = new AbortController();
+    const resp = await fetch("https://edge-tts-proxy.deno.dev/api/audio",{
+      method:"POST",
+      signal:edgeAbortCtrl.signal,
+      headers:{"Content‑Type":"application/json"},
+      body:JSON.stringify({
+        text:pageTxt,
+        voice:"zh‑CN‑Xiaoyi‑Neural",
+        rate:Math.round((speechRate‑1)*20)
+      })
+    });
+    if(!resp.ok) throw new Error("edge_fail");
+    const audioBlob = await resp.blob();
+    const audioObj = new Audio(URL.createObjectURL(audioBlob));
+    audioObj.playbackRate = speechRate;
+    audioObj.onended = ()=>{
+      if(!isPlaying) return;
+      setTimeout(()=>{
+        readPos += pageSize;
+        localStorage.setItem("readPos",readPos);
+        renderPage();
+        readCurrentPage();
+      },autoNextDelay);
+    };
+    await audioObj.play();
+    return;
+  }catch(err){
+    statusDom.innerText="切换内置Piper离线朗读";
+    if(typeof PiperWasm !== "undefined"){
+      if(!piperInstance){
+        piperInstance = await PiperWasm.init("./piper/");
+      }
+      piperInstance.speak(pageTxt,{speed:speechRate},()=>{
+        if(!isPlaying)return;
+        setTimeout(()=>{
+          readPos += pageSize;
+          localStorage.setItem("readPos",readPos);
+          renderPage();
+          readCurrentPage();
+        },autoNextDelay);
+      });
+    }
+  }
+}
+
+playBtn.onclick = async ()=>{
+  if(!bookText){statusDom.innerText="请先打开txt文件";return;}
+  stopAllSpeak();
+  isPlaying = true;
+  await readCurrentPage();
+}
+pauseBtn.onclick = ()=>{
+  isPlaying = false;
+  stopAllSpeak();
+  statusDom.innerText="已暂停";
+}
+</script>
+</body>
+</html>
