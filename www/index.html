@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh‑CN">
+<head>
+<meta charset="UTF‑8">
+<meta name="viewport" content="width=device‑width, initial‑scale=1.0,maximum‑scale=1.0,user‑scalable=no">
+<title>zrzBR阅读器‑Kokoro多镜像版</title>
+<style>
+*{box‑sizing:border‑box;margin:0;padding:0;}
+body{background:#ffffff;color:#222222;padding:12px;font‑family:system‑ui;}
+#textBox{width:100%;min‑height:320px;background:#f8f8f8;padding:14px;border‑radius:10px;white‑space:pre‑wrap;line‑height:1.85;font‑size:17px;overflow‑y:auto;margin‑bottom:14px;color:#111111;border:1px solid #dddddd;}
+.ctrl{display:grid;grid‑template‑columns:1fr 1fr 1fr 1fr;gap:8px;margin‑bottom:12px;}
+button{padding:12px 6px;font‑size:15px;border:none;border‑radius:8px;background:#3b75d6;color:#ffffff;}
+#speedWrap{display:flex;gap:8px;align‑items:center;margin:10px 0;color:#222222;}
+#speedSlider{flex‑grow:1;}
+#resetSpeedBtn{padding:8px;background:#3b75d6;}
+#status{margin:8px 0;color:#555555;font‑size:14px;}
+</style>
+<script type="module">
+import { KokoroTTS } from "https://cdn.jsdmirror.com/npm/kokoro-js@1.1.1/dist/kokoro‑js.js";
+
+const statusDom = document.getElementById("status");
+const textDom = document.getElementById("textBox");
+const fileInput = document.getElementById("fileInput");
+const playBtn = document.getElementById("playBtn");
+const pauseBtn = document.getElementById("pauseBtn");
+const prevBtn = document.getElementById("prevBtn");
+const nextBtn = document.getElementById("nextBtn");
+const speedSlider = document.getElementById("speedSlider");
+const resetSpeedBtn = document.getElementById("resetSpeedBtn");
+const speedVal = document.getElementById("speedVal");
+
+let bookText = "";
+let readPos = 0;
+const pageSize = 800;
+let isPlaying = false;
+let speechRate = 1.0;
+const defaultRate = 1.0;
+let autoNextDelay = 220;
+let audioObj = null;
+let ttsEngine = null;
+
+//国内镜像源列表，自动轮询重试
+const mirrorList = [
+    "https://hf‑mirror.com",
+    "https://huggingface.cn",
+    "https://aliendao.cn"
+];
+let currentMirrorIndex = 0;
+
+async function initKokoro(){
+    if(ttsEngine) return true;
+    statusDom.innerText=`正在下载模型｜镜像${currentMirrorIndex+1}，约180MB，请勿退出`;
+    try{
+        const mirrorUrl = mirrorList[currentMirrorIndex];
+        ttsEngine = await KokoroTTS.from_pretrained("onnx‑community/Kokoro‑82M‑v1.0‑ONNX",{
+            dtype:"q8",
+            remoteHost: mirrorUrl
+        });
+        statusDom.innerText="✅Kokoro语音就绪｜女声 zf_xiaoni（小妮）";
+        return true;
+    }catch(e){
+        currentMirrorIndex++;
+        if(currentMirrorIndex < mirrorList.length){
+            statusDom.innerText="当前源失败，切换下一镜像重试…";
+            await new Promise(r=>setTimeout(r,1200));
+            return await initKokoro();
+        }else{
+            statusDom.innerText="❌全部镜像下载失败，切换网络多点几次重试";
+            return false;
+        }
+    }
+}
+
+fileInput.onchange = async function(e){
+    const f = e.target.files[0];
+    if(!f) return;
+    statusDom.innerText="正在载入文本…";
+    const buf = await f.arrayBuffer();
+    let txt;
+    try{
+        txt = new TextDecoder("utf‑8").decode(buf);
+    }catch{
+        txt = new TextDecoder("gbk").decode(buf);
+    }
+    bookText = txt;
+    readPos = 0;
+    localStorage.setItem("readPos",readPos);
+    renderPage();
+    statusDom.innerText="文本载入完成";
+    if(!ttsEngine) initKokoro();
+};
+
+speedSlider.oninput = function(){
+    speechRate = parseFloat(speedSlider.value);
+    speedVal.innerText = speechRate.toFixed(2);
+};
+resetSpeedBtn.onclick = function(){
+    speechRate = defaultRate;
+    speedSlider.value = speechRate;
+    speedVal.innerText = speechRate.toFixed(2);
+};
+
+function renderPage(){
+    const pageTxt = bookText.slice(readPos, readPos + pageSize);
+    textDom.innerText = pageTxt || "(已读完本书)";
+}
+
+function stopAllSpeak(){
+    isPlaying = false;
+    if(audioObj){
+        audioObj.pause();
+        audioObj = null;
+    }
+}
+
+prevBtn.onclick = function(){
+    stopAllSpeak();
+    readPos = Math.max(0, readPos - pageSize);
+    localStorage.setItem("readPos",readPos);
+    renderPage();
+};
+nextBtn.onclick = function(){
+    stopAllSpeak();
+    readPos += pageSize;
+    localStorage.setItem("readPos",readPos);
+    renderPage();
+};
+
+async function readCurrentPage(){
+    if(!bookText || !isPlaying||!ttsEngine){
+        if(!ttsEngine) statusDom.innerText="语音模型未加载完成";
+        return;
+    }
+    const pageTxt = bookText.slice(readPos, readPos + pageSize);
+    if(!pageTxt){
+        stopAllSpeak();
+        statusDom.innerText="阅读完毕";
+        return;
+    }
+    statusDom.innerText="Kokoro朗读中…";
+    try{
+        //音色改为 zf_xiaoni 温柔女声
+        const audioResult = await ttsEngine.generate(pageTxt,{voice:"zf_xiaoni",speed:speechRate});
+        const wavBlob = new Blob([audioResult.toWav()],{type:"audio/wav"});
+        audioObj = new Audio(URL.createObjectURL(wavBlob));
+        audioObj.onended = ()=>{
+            if(!isPlaying) return;
+            readPos += pageSize;
+            localStorage.setItem("readPos",readPos);
+            renderPage();
+            setTimeout(()=>{readCurrentPage();},autoNextDelay);
+        };
+        await audioObj.play();
+    }catch(err){
+        statusDom.innerText="语音出错:"+err.message;
+        stopAllSpeak();
+    }
+}
+
+playBtn.onclick = async function(){
+    if(!bookText){
+        statusDom.innerText="先选择TXT文件";
+        return;
+    }
+    stopAllSpeak();
+    isPlaying = true;
+    await readCurrentPage();
+};
+pauseBtn.onclick = function(){
+    isPlaying = false;
+    if(audioObj) audioObj.pause();
+    statusDom.innerText="已暂停";
+};
+
+window.onload=()=>{
+    const saved = localStorage.getItem("readPos");
+    if(saved){
+        readPos = Number(saved);
+        renderPage();
+    }
+};
+</script>
+</head>
+<body>
+<input type="file" id="fileInput" accept=".txt" style="margin‑bottom:12px;">
+<div id="status">等待加载小说</div>
+<div id="textBox"></div>
+<div class="ctrl">
+<button id="prevBtn">上一页</button>
+<button id="playBtn">播放</button>
+<button id="pauseBtn">暂停</button>
+<button id="nextBtn">下一页</button>
+</div>
+<div id="speedWrap">
+<span>语速</span>
+<input type="range" id="speedSlider" min="0.5" max="2.2" step="0.05" value="1">
+<button id="resetSpeedBtn">重置1.0x</button>
+<span id="speedVal">1.00</span>
+</div>
+</body>
+</html>
