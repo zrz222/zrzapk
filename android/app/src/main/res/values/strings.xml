@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">zrzBR</string>
+    <string name="title_activity_main">zrzBR</string>
+    <string name="package_name">com.tts.reader</string>
+    <string name="custom_url_scheme">com.tts.reader</string>
+</resources>

@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <title>TXT播书阅读器</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
+    <script src="piper-run.js"></script>
+    <style>
+        *{box-sizing:border-box;margin:0;padding:0;}
+        body{max-width:720px;margin:16px auto;padding:0 12px;font-size:18px;line-height:1.8;}
+        .warn-box{background:#fff2cc;border:1px solid #ffc107;padding:10px;border-radius:8px;margin-bottom:12px;color:#945c00;}
+        .btn-wrap{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;}
+        button{font-size:16px;padding:12px 12px;min-height:48px;border-radius:8px;border:1px solid #777;background:#f7f7f7;}
+        button:active{background:#dddddd;}
+        .speed-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0;}
+        input[type="range"]{flex:1;height:30px;}
+        #progressBar{width:100%;height:24px;margin:10px 0;}
+        #textBox{margin-top:14px;padding:14px;min-height:420px;white-space:pre-wrap;border:1px solid #bbbbbb;border-radius:8px;font-size:17px;line-height:1.9;}
+        #status{margin:8px 0 4px;font-size:15px;}
+    </style>
+</head>
+<body>
+    <div id="warnBox" class="warn-box" style="display:none;">浏览器无法运行内置Piper模型，请安装APK</div>
+    <div id="netTip" style="color:#444;font-size:14px;margin:6px 0;">网络状态检测中...</div>
+
+    <div><input type="file" id="fileInput" accept=".txt"></div>
+    <div class="btn-wrap">
+        <button id="playBtn">播放 / 暂停</button>
+        <button id="prevBtn">上一页</button>
+        <button id="nextBtn">下一页</button>
+    </div>
+    <div class="speed-row">
+        <label>语速</label>
+        <input type="range" id="speedSlider" min="0.4" max="2.2" step="0.1" value="1">
+        <button id="resetSpeed">重置1倍</button>
+    </div>
+    <input type="range" id="progressBar" min="0" max="100" value="0">
+    <div id="status">请选择TXT｜联网=Edge晓伊｜离线=内置Piper</div>
+    <div id="textBox">请选择TXT小说</div>
+    <audio id="audioPlayer">
+
+<script>
+document.addEventListener('DOMContentLoaded',async ()=>{
+    const fileInput = document.getElementById('fileInput');
+    const playBtn = document.getElementById('playBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const speedSlider = document.getElementById('speedSlider');
+    const resetSpeed = document.getElementById('resetSpeed');
+    const progressBar = document.getElementById('progressBar');
+    const statusDom = document.getElementById('status');
+    const textBox = document.getElementById('textBox');
+    const warnBox = document.getElementById('warnBox');
+    const audioPlayer = document.getElementById("audioPlayer");
+    const netTipDom = document.getElementById("netTip");
+
+    let bookText = "";
+    let playPos = 0;
+    let viewPos = 0;
+    let currentFileName = "";
+    const chunkSize = 720;
+    const pageSize = 800;
+    let speechRate = 1.0;
+    let isPlaying = false;
+
+    function setStatus(s){ statusDom.innerText = s; }
+    function updateNetStatus(){
+        if(navigator.onLine){
+            netTipDom.innerText = "🌐 当前网络：已连接";
+        }else{
+            netTipDom.innerText = "🔌 当前网络：离线模式";
+        }
+    }
+    updateNetStatus();
+    window.addEventListener("online",updateNetStatus);
+    window.addEventListener("offline",updateNetStatus);
+
+    if(!window.speechSynthesis){
+        warnBox.style.display="block";
+        playBtn.disabled=true;
+        playBtn.innerText="无朗读支持";
+    }
+
+    function renderView(){
+        const slice = bookText.slice(viewPos, viewPos + pageSize);
+        textBox.innerText = slice;
+        const pct = bookText.length>0 ? Math.floor(playPos / bookText.length * 100) : 0;
+        progressBar.value = pct;
+        if(currentFileName && bookText.length>0){
+            localStorage.setItem("book_pos_"+currentFileName, String(playPos));
+        }
+    }
+
+    fileInput.onchange = async e=>{
+        const f = e.target.files[0];
+        if(!f) return;
+        setStatus("读取TXT文件...");
+        currentFileName = f.name;
+        const buf = await f.arrayBuffer();
+        const contentUtf8 = new TextDecoder("utf-8").decode(buf);
+        const contentGb18030 = new TextDecoder("gb18030").decode(buf);
+        const badUtf8 = (contentUtf8.match(/�/g) || []).length;
+        const badGb18030 = (contentGb18030.match(/�/g) || []).length;
+        if(badUtf8 <= badGb18030){
+            bookText = contentUtf8;
+        }else{
+            bookText = contentGb18030;
+        }
+        const saved = localStorage.getItem("book_pos_"+currentFileName);
+        if(saved !== null){
+            const savedPos = parseInt(saved,10);
+            if(!isNaN(savedPos) && savedPos < bookText.length){
+                playPos = savedPos;
+                viewPos = savedPos;
+            }else{
+                playPos = 0; viewPos = 0;
+            }
+        }else{
+            playPos = 0; viewPos = 0;
+        }
+        renderView();
+    }
+
+    function stopRead(){
+        isPlaying = false;
+        if(window.speechSynthesis) window.speechSynthesis.cancel();
+        audioPlayer.pause();
+        audioPlayer.src = "";
+        setStatus("已暂停");
+    }
+
+    async function fetchEdgeAudio(text, retryCount=0){
+        const voiceName = "zh‑CN‑XiaoyiNeural";
+        const ssml = `<speak version="1.0" xml:lang="zh‑CN"><voice name="${voiceName}"><prosody rate="${speechRate}">${text}</prosody></voice></speak>`;
+        try{
+            const res = await fetch("https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=6A5CD3C20E44432F9F57214C8045782B",{
+                method:"POST",
+                headers:{
+                    "Content‑Type":"application/ssml+xml",
+                    "User‑Agent":"Mozilla/5.0 (Linux; Android)"
+                },
+                body:ssml
+            });
+            if(!res.ok) throw new Error("edge请求失败");
+            return await res.blob();
+        }catch(err){
+            if(retryCount < 2){
+                setStatus(`🔄云端晓伊重试 ${retryCount+1}/2`);
+                await new Promise(r=>setTimeout(r,600));
+                return await fetchEdgeAudio(text,retryCount+1);
+            }else throw err;
+        }
+    }
+
+    async function speakNextChunk(){
+        if(!isPlaying) return;
+        let chunkText = bookText.slice(playPos, playPos + chunkSize);
+        if(!chunkText){
+            stopRead();
+            setStatus("全书朗读结束");
+            return;
+        }
+        chunkText = chunkText.replace(/\s+$/,'');
+        const endPos = playPos + chunkSize;
+
+        if(navigator.onLine){
+            try{
+                setStatus("✅在线Edge晓伊女声朗读中");
+                const blob = await fetchEdgeAudio(chunkText);
+                const tempUrl = URL.createObjectURL(blob);
+                audioPlayer.src = tempUrl;
+                await audioPlayer.play();
+                await new Promise(resolve=>{ audioPlayer.onended = resolve; });
+                URL.revokeObjectURL(tempUrl);
+                playPos = endPos;
+                renderView();
+                setTimeout(()=>{ if(isPlaying) speakNextChunk(); },15);
+                return;
+            }catch(err){
+                setStatus("⚠️云端语音失败，加载内置Piper离线模型");
+            }
+        }
+
+        try{
+            const ok = await loadPiperModel();
+            if(!ok) throw new Error("Piper初始化失败");
+            const audioBlob = await piperGenerateAudio(chunkText, speechRate);
+            const tempUrl = URL.createObjectURL(audioBlob);
+            audioPlayer.src = tempUrl;
+            await audioPlayer.play();
+            await new Promise(resolve=>{ audioPlayer.onended = resolve; });
+            URL.revokeObjectURL(tempUrl);
+            playPos = endPos;
+            renderView();
+            setTimeout(()=>{ if(isPlaying) speakNextChunk(); },20);
+            return;
+        }catch(e){
+            setStatus("⚠️Piper异常，兜底安卓TTS");
+        }
+
+        const utter = new SpeechSynthesisUtterance(chunkText);
+        utter.rate = speechRate;
+        utter.lang = "zh‑CN";
+        utter.onend = function(){
+            playPos = endPos;
+            renderView();
+            setTimeout(()=>{
+                if(isPlaying){
+                    window.speechSynthesis.cancel();
+                    speakNextChunk();
+                }
+            },15);
+        };
+        utter.onerror = function(){
+            playPos = endPos;
+            renderView();
+            setTimeout(()=>{if(isPlaying) speakNextChunk();},30);
+        };
+        window.speechSynthesis.speak(utter);
+    }
+
+    playBtn.onclick = ()=>{
+        if(!bookText){
+            setStatus("请先选择TXT文件");
+            return;
+        }
+        if(!window.speechSynthesis){
+            setStatus("❌无TTS支持");
+            return;
+        }
+        if(isPlaying){
+            stopRead();
+        }else{
+            isPlaying = true;
+            speakNextChunk();
+        }
+    }
+
+    prevBtn.onclick = ()=>{
+        viewPos = Math.max(0, viewPos - pageSize);
+        renderView();
+    }
+    nextBtn.onclick = ()=>{
+        viewPos += pageSize;
+        renderView();
+    }
+
+    speedSlider.oninput = ()=>{
+        speechRate = Number(speedSlider.value);
+        if(isPlaying){
+            stopRead();
+            isPlaying=true;
+            speakNextChunk();
+        }
+    }
+    resetSpeed.onclick = ()=>{
+        speechRate = 1.0;
+        speedSlider.value = 1.0;
+        if(isPlaying){
+            stopRead();
+            isPlaying=true;
+            speakNextChunk();
+        }
+        setStatus("语速重置1.0倍");
+    }
+    progressBar.oninput = ()=>{
+        stopRead();
+        const val = Number(progressBar.value);
+        const targetPos = Math.floor(val / 100 * bookText.length);
+        playPos = targetPos;
+        viewPos = targetPos;
+        renderView();
+    }
+})
+</script>
+</body>
+</html>
