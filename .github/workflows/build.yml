@@ -10,17 +10,18 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '22.x'
           cache: 'npm'
       - name: Install dependencies
         run: npm install
-      - name: Sync capacitor
+      - name: Capacitor sync
         run: npx cap sync android
-      - name: Build Android APK
+      - name: Gradle Build Release APK
         run: |
           cd android
+          chmod +x gradlew
           ./gradlew assembleRelease
-      - name: Download APK
+      - name: Upload built APK
         uses: actions/upload-artifact@v4
         with:
           name: app-apk
